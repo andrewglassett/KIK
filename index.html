@@ -156,6 +156,17 @@
     .fx-group-knobs { display: flex; gap: 14px; }
     .fx-divider { width: 1px; height: 64px; background: #2e2e2e; flex-shrink: 0; }
 
+    /* Filter mode toggle */
+    .filter-mode-btn {
+      padding: 3px 9px;
+      border: 1px solid #444; background: transparent; color: #666;
+      border-radius: 4px; cursor: pointer; font-family: inherit;
+      font-size: 0.65rem; letter-spacing: 0.1em;
+      transition: all 0.12s;
+    }
+    .filter-mode-btn.lp { border-color: #3a9e6e; color: #3a9e6e; }
+    .filter-mode-btn.hp { border-color: #9b59b6; color: #9b59b6; }
+
     .randomize-btn {
       margin-left: auto; padding: 8px 14px;
       border: 1px solid #555; background: transparent; color: #aaa;
@@ -275,6 +286,29 @@
         <div class="knob" id="kick-click-knob"></div>
         <span id="kick-click-display">60%</span>
       </div>
+      <div class="fx-divider"></div>
+
+      <div class="fx-group">
+        <div class="fx-group-label">Filter</div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <div class="knob-wrap">
+            <label>Cutoff</label>
+            <div class="knob" id="kick-filter-knob"></div>
+            <span id="kick-filter-display">20kHz</span>
+          </div>
+          <button class="filter-mode-btn lp" id="kick-filter-mode-btn">LP</button>
+        </div>
+      </div>
+
+      <div class="fx-group">
+        <div class="fx-group-label">Volume</div>
+        <div class="knob-wrap">
+          <label>Level</label>
+          <div class="knob" id="kick-vol-knob"></div>
+          <span id="kick-vol-display">80%</span>
+        </div>
+      </div>
+
       <button class="randomize-btn" id="kick-randomize-btn">&#9684; Randomize</button>
     </div>
 
@@ -411,8 +445,8 @@
 
   <script>
     const TRACKS = [
-      { name: 'Kick 1', color: '#e74c3c', sound: 'kick' },
-      { name: 'Kick 2', color: '#e67e22', sound: 'kick' },
+      { name: 'Kik 1', color: '#e74c3c', sound: 'kick' },
+      { name: 'Kik 2', color: '#e67e22', sound: 'kick' },
     ];
     const NUM_STEPS = 16;
 
@@ -431,6 +465,7 @@
         bits: 0,
         compThresh: 0.65, compRatio: 0.54, compAtk: 0.5,
         compRel: 0.49, compKnee: 0.5, compMakeup: 0,
+        filterCutoff: 1, filterMode: 'lowpass', volume: 0.8,
       };
     }
     const kickState    = [defaultKickState(), defaultKickState()];
@@ -502,6 +537,15 @@
       const c = getCtx();
       const p = kickState[idx];
 
+      // Korg-35 style filter: single 12dB/oct pole, Q≈3.5 for that characteristic resonant colour
+      const channelFilter = c.createBiquadFilter();
+      channelFilter.type = p.filterMode;
+      channelFilter.frequency.value = 20 * Math.pow(1000, p.filterCutoff);
+      channelFilter.Q.value = 3.5;
+
+      const channelGain = c.createGain();
+      channelGain.gain.value = p.volume;
+
       const drive    = c.createWaveShaper();
       const bitCrush = c.createWaveShaper();
       const delay    = c.createDelay(2.0);
@@ -531,6 +575,7 @@
       comp.release.value     = 0.020 * Math.pow(40, p.compRel);
       makeup.gain.value      = Math.pow(10, (p.compMakeup * 18) / 20);
 
+      channelFilter.connect(drive);
       drive.connect(bitCrush);
       bitCrush.connect(delayDry);
       bitCrush.connect(delay);
@@ -540,9 +585,9 @@
       delayWet.connect(reverbDry); delayWet.connect(reverb);
       reverb.connect(reverbWet);
       reverbDry.connect(comp); reverbWet.connect(comp);
-      comp.connect(makeup); makeup.connect(getOutput());
+      comp.connect(makeup); makeup.connect(channelGain); channelGain.connect(getOutput());
 
-      kickFxChains[idx] = { drive, bitCrush, delay, delayFb, delayDry, delayWet, reverb, reverbDry, reverbWet, comp, makeup };
+      kickFxChains[idx] = { channelFilter, channelGain, drive, bitCrush, delay, delayFb, delayDry, delayWet, reverb, reverbDry, reverbWet, comp, makeup };
       return kickFxChains[idx];
     }
 
@@ -603,7 +648,7 @@
       const osc  = c.createOscillator();
       const gain = c.createGain();
       osc.setPeriodicWave(makeKickWave(c, p.wave));
-      osc.connect(gain); gain.connect(fx.drive);
+      osc.connect(gain); gain.connect(fx.channelFilter);
       const bendTarget = Math.max(pitch * (1 - p.bend), 0.5);
       osc.frequency.setValueAtTime(pitch, when);
       osc.frequency.exponentialRampToValueAtTime(bendTarget, when + bendTime);
@@ -625,7 +670,7 @@
         clickFilt.type = 'bandpass';
         clickFilt.frequency.value = 2200 + clickAmt * 1800;
         clickFilt.Q.value = 0.9;
-        click.connect(clickFilt); clickFilt.connect(clickGain); clickGain.connect(fx.drive);
+        click.connect(clickFilt); clickFilt.connect(clickGain); clickGain.connect(fx.channelFilter);
         const clickDur = 0.004 + clickAmt * 0.046;
         clickGain.gain.setValueAtTime(clickAmt * 1.8, when);
         clickGain.gain.exponentialRampToValueAtTime(0.0001, when + clickDur);
@@ -781,7 +826,35 @@
       return { get: () => value, set };
     }
 
-    // --- Filter ---
+    // --- Per-channel filter (Korg-35 style) and volume ---
+    const kickFilterKnob = makeKnob('kick-filter-knob', kickState[0].filterCutoff, n => {
+      kickState[activeKick].filterCutoff = n;
+      const freq = 20 * Math.pow(1000, n);
+      const hz = freq >= 1000 ? (freq / 1000).toFixed(freq >= 10000 ? 0 : 1) + 'kHz' : Math.round(freq) + 'Hz';
+      document.getElementById('kick-filter-display').textContent = hz;
+      const fx = kickFxChains[activeKick];
+      if (fx) fx.channelFilter.frequency.setTargetAtTime(freq, getCtx().currentTime, 0.01);
+    });
+
+    document.getElementById('kick-filter-mode-btn').addEventListener('click', () => {
+      const mode = kickState[activeKick].filterMode === 'lowpass' ? 'highpass' : 'lowpass';
+      kickState[activeKick].filterMode = mode;
+      const btn = document.getElementById('kick-filter-mode-btn');
+      btn.textContent = mode === 'lowpass' ? 'LP' : 'HP';
+      btn.className = 'filter-mode-btn ' + (mode === 'lowpass' ? 'lp' : 'hp');
+      const fx = kickFxChains[activeKick];
+      if (fx) fx.channelFilter.type = mode;
+      if (autoSaveFn) autoSaveFn();
+    });
+
+    const kickVolKnob = makeKnob('kick-vol-knob', kickState[0].volume, n => {
+      kickState[activeKick].volume = n;
+      document.getElementById('kick-vol-display').textContent = Math.round(n * 100) + '%';
+      const fx = kickFxChains[activeKick];
+      if (fx) fx.channelGain.gain.setTargetAtTime(n, getCtx().currentTime, 0.02);
+    });
+
+    // --- Master filter ---
     const filterKnobRef = makeKnob('filter-knob', 0, n => {
       const freq = 20000 * Math.pow(80 / 20000, n);
       const hz = freq >= 1000 ? (freq / 1000).toFixed(freq >= 10000 ? 0 : 1) + 'kHz' : Math.round(freq) + 'Hz';
@@ -953,6 +1026,8 @@
       [kickCompRatioKnob, 'compRatio'], [kickCompAttackKnob,   'compAtk'],
       [kickCompReleaseKnob,'compRel'],  [kickCompKneeKnob,     'compKnee'],
       [kickCompMakeupKnob,'compMakeup'],
+      [kickFilterKnob,    'filterCutoff'],
+      [kickVolKnob,       'volume'],
     ];
 
     function switchToKick(idx) {
@@ -961,6 +1036,10 @@
       document.getElementById('kick-toggle-2').classList.toggle('active', idx === 1);
       const s = kickState[idx];
       allKickKnobs.forEach(([knob, key]) => knob.set(s[key]));
+      const mode = s.filterMode || 'lowpass';
+      const btn = document.getElementById('kick-filter-mode-btn');
+      btn.textContent = mode === 'lowpass' ? 'LP' : 'HP';
+      btn.className = 'filter-mode-btn ' + (mode === 'lowpass' ? 'lp' : 'hp');
     }
 
     document.getElementById('kick-toggle-1').addEventListener('click', () => switchToKick(0));
